@@ -101,6 +101,7 @@ public class TweetNLPEnhancement {
                     Long id;
                     String sentiment;
                     int sentimentScore;
+                    List<Double> newLoc = new ArrayList<>();
 
                         /* Incoming record may be with or without schema */
                     if (sourceRecord.containsKey("payload") && sourceRecord.containsKey("schema")) {
@@ -158,10 +159,8 @@ public class TweetNLPEnhancement {
                         Double lon = (Double)loc.getOrDefault("Longitude", 0);
                         Double lat = (Double)loc.getOrDefault("Latitude", 0);
 
-                        List<Double> newLoc = new ArrayList<>();
                         newLoc.add(lon);
                         newLoc.add(lat);
-                        payloadRecord.put ("Location", newLoc);
                     }
 
                     if (!payloadRecord.containsKey("SentimentScore")) {
@@ -171,6 +170,7 @@ public class TweetNLPEnhancement {
 
                         payloadRecord.put("SentimentScore", sentimentScore);
                         payloadRecord.put("Sentiment", sentiment);
+                        payloadRecord.put ("Location", newLoc);
                     } else {
                         sentimentScore = (int)payloadRecord.get("SentimentScore");
                         sentiment =  scores.get(sentimentScore);
@@ -259,7 +259,7 @@ public class TweetNLPEnhancement {
                  Long id = (Long) value.get("Id");
                  String sentiment;
                  int sentimentScore;
-                 List<Double> newLoc = null;
+                 List<Double> newLoc = new ArrayList<>();
 
                     // Make sure we have our schema to work with
                     // Assumes that all our input records will have same schema (safe enough assumption for now)
@@ -296,7 +296,6 @@ public class TweetNLPEnhancement {
                          Double lat = (Double)loc.get("Latitude");
 
                          if (lon != null  && lat != null) {
-                             newLoc = new ArrayList<>();
                              newLoc.add(lon);
                              newLoc.add(lat);
                          }
@@ -319,7 +318,7 @@ public class TweetNLPEnhancement {
 
                      retVal.put("SentimentScore", Integer.valueOf(sentimentScore));
                      retVal.put("Sentiment", sentiment);
-                     if (newLoc != null) retVal.put("Location", newLoc);
+                     retVal.put("Location", newLoc);
                  } else {
                      sentimentScore = (int)value.get("SentimentScore");
                      sentiment =  scores.get(sentimentScore);
