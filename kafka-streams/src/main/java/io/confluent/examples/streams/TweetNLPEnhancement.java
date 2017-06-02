@@ -1,17 +1,74 @@
+/**
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package io.confluent.examples.streams;
 
-/* Second refactoring of Twitter / Confluent / Couchbase demo
+/**
+ * Demonstrates enriching an incoming data stream and publishing the enriched records.
+ * <p>
+ * In this example we ingest Twitter events produced by a Kafka Connect Source and enhance
+ * them with some sentiment analysis of the tweet itself.
+ *
+ * <p>
+ * <br>
+ * HOW TO RUN THIS EXAMPLE
+ * <p>
+ * 1) Start Zookeeper, Kafka, Confluent Schema Registry, and Kafka Connect worker.
+ * You'll need to include the Twitter Source Connector in your Connect worker configuration.
+ * Please refer to <a href='http://docs.confluent.io/current/quickstart.html#quickstart'>QuickStart</a>.
+ * <p>
+ * 2) Create the input/intermediate/output topics used by this example.
+ * <pre>
+ * {@code
+ * $ bin/kafka-topics --create --topic tweets \
+ *                    --zookeeper localhost:2181 --partitions 1 --replication-factor 1
+ * $ bin/kafka-topics --create --topic tweets.enriched \
+ *                    --zookeeper localhost:2181 --partitions 1 --replication-factor 1
+ * $ bin/kafka-topics --create --topic tweets.sentiment \
+ *                    --zookeeper localhost:2181 --partitions 1 --replication-factor 1
+ * }</pre>
+ * Note: The above commands are for the Confluent Platform. For Apache Kafka it should be
+ * `bin/kafka-topics.sh ...`.
+ * <p>
+ * 3) Start the Twitter Source connector so that events arrive on the 'tweets' topic.
+ * <p>
+ * 4) Start this example application either in your IDE or on the command line.
+ * <p>
+ *
+ */
+
+/* Internal details :
 
     Twitter stream enhanced with NLP-based sentiment analysis of tweet,
     as well as re-structuring GeoLocation fields to be compatible with Couch.
 
-    Designed to handle any Connect Converter (with or without schema)
+    Designed to handle either flavor of Connect Converter (JSON or Avro),
+    with or without schema.
 
     Data Flow
-        inbound topic: tweets
-        outbound topics :
+        inbound topic: tweets (overridable with tweets.input.topic property)
+        outbound topics  (overridable with tweets.enriched.topic and tweets.sentiment.topic):
             tweets.enriched     # with NLP sentiment
             tweets.sentiment    # sentiments scores and tweet id only
+
+    We tried one approach where users had to specify the the converter type
+    (and thus the topology).   The second approach was to default to AVRO and
+    then catch any exception thrown by the topology and fall back to JSON.
+
  */
 
 import io.confluent.examples.streams.utils.NLP;
@@ -39,6 +96,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.*;
 
+import static java.lang.System.exit;
+
 public class TweetNLPEnhancement {
 
     static public class SentimentValue {
@@ -65,6 +124,15 @@ public class TweetNLPEnhancement {
 
     private static Schema enrichedAvroSchema;
     private static Map<String, Object> enrichedJsonSchema;
+    private static Boolean redeployTopology;
+
+    private static KafkaStreams streams;
+
+    private static void topologyExceptionHandler (Thread t, Throwable e)
+    {
+        System.out.println("  Uncaught exception thrown in topology ");
+        redeployTopology = true;
+    }
 
     private static void deployJsonTopology (Properties streamsConfiguration)
             throws Exception
@@ -228,13 +296,11 @@ public class TweetNLPEnhancement {
 
         sentiments.to(sentimentTopic);
 
-        final KafkaStreams streams = new KafkaStreams(builder, streamsConfiguration);
+        streams = new KafkaStreams(builder, streamsConfiguration);
         streams.start();
 
         // Add shutdown hook to respond to SIGTERM and gracefully close Kafka Streams
         Runtime.getRuntime().addShutdownHook(new Thread(streams::close));
-
-        System.in.read();
     }
 
     private static void deployAvroTopology (Properties streamsConfiguration)
@@ -333,18 +399,18 @@ public class TweetNLPEnhancement {
             /* Dump enriched tweets topic */
         enrichedTweets.to(enrichedTopic);
 
-        final KafkaStreams streams = new KafkaStreams(builder, streamsConfiguration);
+        streams = new KafkaStreams(builder, streamsConfiguration);
+        streams.setUncaughtExceptionHandler(TweetNLPEnhancement::topologyExceptionHandler);
         streams.start();
 
         // Add shutdown hook to respond to SIGTERM and gracefully close Kafka Streams
         Runtime.getRuntime().addShutdownHook(new Thread(streams::close));
-
-        System.in.read();
     }
 
     public static void main(final String[] args) throws Exception {
         enrichedAvroSchema = null;
         enrichedJsonSchema = null;
+        redeployTopology = false;
 
         final Properties streamsConfiguration = new Properties();
         Properties progConfiguration = new Properties();
@@ -355,7 +421,6 @@ public class TweetNLPEnhancement {
         streamsConfiguration.put(TWEETS_INPUT_CONFIG, "tweets");
         streamsConfiguration.put(TWEETS_ENRICHED_CONFIG, "tweets.enriched");
         streamsConfiguration.put(TWEETS_SENTIMENT_CONFIG, "tweets.sentiment");
-        streamsConfiguration.put(APP_DEFAULT_SERDES, "json");
 
         // Where to find Kafka broker(s).
         streamsConfiguration.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
@@ -427,12 +492,26 @@ public class TweetNLPEnhancement {
         // Warm up NLP processor
         NLP.findSentiment("hello");
 
-        if (streamsConfiguration.get(APP_DEFAULT_SERDES).toString().compareToIgnoreCase("avro") == 0) {
-            //       streamsConfiguration.put(TWEETS_INPUT_CONFIG, "tweets.avro");
+        String defaultSerdes = streamsConfiguration.getProperty(APP_DEFAULT_SERDES, "avro");
+
+        if (defaultSerdes.compareToIgnoreCase("avro") == 0) {
             deployAvroTopology(streamsConfiguration);
         } else {
-            //       streamsConfiguration.put(TWEETS_INPUT_CONFIG, "tweets.json");
             deployJsonTopology(streamsConfiguration);
+        }
+
+        // The Avro Topology will set the redeployTopology flag for any uncaught exception,
+        // which is most likely a deserialization error.   On that assumption, we'll
+        // fall back to the json topology.   This avoids the hassle of requiring the
+        // APP_DEFAULT_SERDES parameter and getting it wrong.
+        while (! redeployTopology) {
+            if (streams.state() == KafkaStreams.State.PENDING_SHUTDOWN) break;
+            Thread.sleep(250);
+        }
+        if (redeployTopology) {
+            streams.close();
+            deployJsonTopology(streamsConfiguration);
+            System.in.read();
         }
     }
 }
